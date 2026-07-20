@@ -8,6 +8,8 @@
 // Stages are created one at a time as results come in (advancePlayoffs is
 // idempotent and only creates the next stage that is possible).
 
+import { readSheet } from "../excel/store.js";
+import { SHEETS } from "../excel/schema.js";
 import { getTournament } from "./tournament.service.js";
 import { createMatch, updateMatch, matchesForTournament } from "./match.service.js";
 import { getPlayer } from "./player.service.js";
@@ -27,6 +29,26 @@ async function sideName(id) {
   return String(id || "");
 }
 
+// Build in-memory lookup maps for every player/team once, so resolving names
+// for many sides doesn't cost one DB round trip per side. Returns sync
+// getPlayer/getTeam-shaped functions that read from these maps.
+async function buildLookup() {
+  const [players, teams] = await Promise.all([readSheet(SHEETS.Players), readSheet(SHEETS.Teams)]);
+  const playerById = new Map(players.map((p) => [p.id, p]));
+  const teamById = new Map(teams.map((t) => [t.id, t]));
+  return {
+    getPlayer: (id) => playerById.get(id) || null,
+    getTeam: (id) => teamById.get(id) || null,
+    sideName: (id) => {
+      const p = playerById.get(id);
+      if (p) return fullName(p);
+      const t = teamById.get(id);
+      if (t) return t.name;
+      return String(id || "");
+    },
+  };
+}
+
 function tallySets(m) {
   let a = 0, b = 0, pf = 0, pa = 0;
   for (const s of [m.set1, m.set2, m.set3]) {
@@ -40,6 +62,16 @@ function tallySets(m) {
   return { a, b, pf, pa };
 }
 
+// Net Points Rate — the badminton equivalent of cricket's Net Run Rate:
+//   NPR = (points scored − points conceded) ÷ sets played
+// A RATE rather than a raw sum, so it stays comparable even when two teams
+// haven't played the exact same number of sets. Blank (null) until a team
+// has actually played at least one set — never divides by zero.
+function netPointsRate(r) {
+  if (!r.setsPlayed) return null;
+  return Math.round(((r.pointsFor - r.pointsAgainst) / r.setsPlayed) * 100) / 100;
+}
+
 // Standings table for a tournament. Rank is determined by LEAGUE performance
 // only (this is what seeds the playoffs — #1 vs #2, etc. — and must never
 // shift once Qualifier 1/Semi/Final are underway). The displayed
@@ -47,45 +79,57 @@ function tallySets(m) {
 // team went on to play, so the table reflects their full run through the
 // tournament, not just the round-robin stage.
 export async function leagueStandings(tournamentId) {
-  const all = await matchesForTournament(tournamentId);
+  const [all, lookup] = await Promise.all([matchesForTournament(tournamentId), buildLookup()]);
   const table = {};
-  const names = {};
-  const ensure = async (id) => {
+  const ensure = (id) => {
     if (!table[id]) {
-      if (!(id in names)) names[id] = await sideName(id);
-      table[id] = { id, name: names[id], played: 0, wins: 0, losses: 0, setDiff: 0, pointDiff: 0, points: 0 };
+      table[id] = {
+        id, name: lookup.sideName(id), played: 0, wins: 0, losses: 0,
+        setDiff: 0, pointDiff: 0, points: 0,
+        pointsFor: 0, pointsAgainst: 0, setsPlayed: 0,
+      };
     }
     return table[id];
   };
 
-  const tally = async (m) => {
+  const tally = (m) => {
     if (m.status !== "Completed") return;
     if (!m.side1Id || !m.side2Id) return;
-    const s1 = await ensure(m.side1Id);
-    const s2 = await ensure(m.side2Id);
+    const s1 = ensure(m.side1Id);
+    const s2 = ensure(m.side2Id);
     const { a, b, pf, pa } = tallySets(m);
     s1.played++; s2.played++;
     s1.setDiff += a - b; s2.setDiff += b - a;
     s1.pointDiff += pf - pa; s2.pointDiff += pa - pf;
+    s1.pointsFor += pf; s1.pointsAgainst += pa;
+    s2.pointsFor += pa; s2.pointsAgainst += pf;
+    s1.setsPlayed += a + b; s2.setsPlayed += a + b;
     if (String(m.winnerId) === String(m.side1Id)) { s1.wins++; s2.losses++; }
     else if (String(m.winnerId) === String(m.side2Id)) { s2.wins++; s1.losses++; }
   };
 
-  for (const m of all.filter(isLeagueMatch)) await tally(m);
+  all.filter(isLeagueMatch).forEach(tally);
 
-  // Freeze the rank from league performance only.
+  // Freeze the rank from league performance only. Net Points Rate is the
+  // final tiebreaker — only ever consulted if wins, set diff AND point diff
+  // are all still tied.
   const rankById = Object.fromEntries(
     Object.values(table)
-      .sort((x, y) => y.wins - x.wins || y.setDiff - x.setDiff || y.pointDiff - x.pointDiff)
+      .sort((x, y) =>
+        y.wins - x.wins ||
+        y.setDiff - x.setDiff ||
+        y.pointDiff - x.pointDiff ||
+        (netPointsRate(y) ?? -Infinity) - (netPointsRate(x) ?? -Infinity)
+      )
       .map((r, i) => [r.id, i + 1])
   );
 
   // Now fold in the playoff matches — same accumulators, so Played/W/L/Pts
   // become the team's full total while the rank order stays as league-set.
-  for (const m of all.filter((m) => PLAYOFF_ROUNDS.includes(String(m.round)))) await tally(m);
+  all.filter((m) => PLAYOFF_ROUNDS.includes(String(m.round))).forEach(tally);
 
   return Object.values(table)
-    .map((r) => ({ ...r, points: r.wins * 2, rank: rankById[r.id] ?? 999 }))
+    .map((r) => ({ ...r, points: r.wins * 2, rank: rankById[r.id] ?? 999, netPointsRate: netPointsRate(r) }))
     .sort((a, b) => a.rank - b.rank);
 }
 

@@ -1,8 +1,6 @@
-import { readSheet, replaceSheet } from "../excel/store.js";
+import { readSheet, writeSheet, replaceSheet } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, nowIso, pct, fullName } from "../utils.js";
-import { getPlayer } from "./player.service.js";
-import { getTeam } from "./team.service.js";
 import { getPointsMap, pointsForRound } from "./points.service.js";
 
 // ---------------------------------------------------------------------------
@@ -11,16 +9,6 @@ import { getPointsMap, pointsForRound } from "./points.service.js";
 // win-percentage, titles won and recent performance. Recomputed whenever a
 // match result is entered.
 // ---------------------------------------------------------------------------
-
-// Resolve a match "side" id to the individual player id(s) behind it — the
-// player themself for Singles, or BOTH members for a Doubles team.
-async function resolvePlayerIds(sideId) {
-  if (!sideId) return [];
-  if (await getPlayer(sideId)) return [sideId];
-  const team = await getTeam(sideId);
-  if (team) return [team.player1Id, team.player2Id].filter(Boolean);
-  return [];
-}
 
 function isFinalRound(round) {
   const r = String(round || "").toLowerCase();
@@ -34,19 +22,41 @@ function isFinalRound(round) {
 // many times a result is edited, a match is deleted, or fixtures are
 // regenerated. Works identically for Singles and Doubles (a team's win/loss
 // credits both members) and for every tournament format.
+//
+// Players and Teams are fetched ONCE up front (2 queries) instead of once per
+// match — over a network database, resolving each match's winner/loser one
+// row at a time turns a handful of matches into dozens of round trips.
 async function computePlayerStatsFromMatches() {
-  const allMatches = await readSheet(SHEETS.Matches);
+  const [allMatches, allPlayers, allTeams, cfg] = await Promise.all([
+    readSheet(SHEETS.Matches),
+    readSheet(SHEETS.Players),
+    readSheet(SHEETS.Teams),
+    getPointsMap(),
+  ]);
   const matches = allMatches.filter(
     (m) => (m.status === "Completed" || m.status === "Walkover") && m.winnerId
   );
-  const cfg = await getPointsMap();
+  const playerIds = new Set(allPlayers.map((p) => p.id));
+  const teamById = new Map(allTeams.map((t) => [t.id, t]));
+
+  // Resolve a match "side" id to the individual player id(s) behind it — the
+  // player themself for Singles, or BOTH members for a Doubles team. Purely
+  // in-memory now (no DB calls) using the lookups fetched above.
+  const resolvePlayerIds = (sideId) => {
+    if (!sideId) return [];
+    if (playerIds.has(sideId)) return [sideId];
+    const team = teamById.get(sideId);
+    if (team) return [team.player1Id, team.player2Id].filter(Boolean);
+    return [];
+  };
+
   const stats = {};
   const ensure = (id) => (stats[id] = stats[id] || { matchesPlayed: 0, wins: 0, losses: 0, points: 0, titles: 0 });
 
   for (const m of matches) {
     const final = isFinalRound(m.round);
-    const winnerIds = await resolvePlayerIds(m.winnerId);
-    const loserIds = await resolvePlayerIds(m.loserId);
+    const winnerIds = resolvePlayerIds(m.winnerId);
+    const loserIds = resolvePlayerIds(m.loserId);
     for (const pid of winnerIds) {
       const s = ensure(pid);
       s.matchesPlayed++;
@@ -64,9 +74,11 @@ async function computePlayerStatsFromMatches() {
   return stats;
 }
 
+// Returns the freshly-updated player rows so callers can reuse them directly
+// instead of reading the Players table again right after writing it.
 async function syncPlayerStats() {
   const stats = await computePlayerStatsFromMatches();
-  await replaceSheet(SHEETS.Players, (players) =>
+  return replaceSheet(SHEETS.Players, (players) =>
     players.map((p) => {
       const s = stats[p.id];
       return {
@@ -98,8 +110,9 @@ function rankGroup(players) {
 // Resync every player's stats from the match log, then rebuild the Rankings
 // sheet from those fresh stats across all scopes (Overall/State/Club/Yearly).
 export async function recalculateRankings() {
-  await syncPlayerStats();
-  const players = await readSheet(SHEETS.Players);
+  // syncPlayerStats already returns the freshly-written rows — reuse them
+  // directly instead of reading the Players table a second time.
+  const players = await syncPlayerStats();
   const year = new Date().getFullYear();
   const rows = [];
 
@@ -147,14 +160,15 @@ export async function recalculateRankings() {
   // Yearly (current year snapshot mirrors overall)
   build("Yearly", String(year), players);
 
-  await replaceSheet(SHEETS.Rankings, rows);
+  // Direct writes (not replaceSheet) — we already have the full row set in
+  // memory, so there's no need to read the table again just to discard it.
+  await writeSheet(SHEETS.Rankings, rows);
 
   // Also write each player's overall rank back onto the Players sheet.
   const overall = rankGroup(players);
   const rankById = Object.fromEntries(overall.map((p) => [p.id, p.rank]));
-  await replaceSheet(SHEETS.Players, (current) =>
-    current.map((p) => ({ ...p, currentRanking: rankById[p.id] ?? p.currentRanking ?? 0 }))
-  );
+  const withRank = players.map((p) => ({ ...p, currentRanking: rankById[p.id] ?? p.currentRanking ?? 0 }));
+  await writeSheet(SHEETS.Players, withRank);
 
   return rows;
 }

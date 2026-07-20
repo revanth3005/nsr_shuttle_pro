@@ -16,6 +16,9 @@ export async function registrationsForTournament(tournamentId) {
   return filter(SHEETS.Registrations, (r) => String(r.tournamentId) === String(tournamentId));
 }
 
+// Decorate a single registration — kept for one-off use, but callers with a
+// whole list should use decorateRegistrations() below instead, which batches
+// the player/team/tournament lookups into 3 total queries instead of 3 per row.
 export async function decorateRegistration(r) {
   const [t, player, team] = await Promise.all([
     getTournament(r.tournamentId),
@@ -29,9 +32,34 @@ export async function decorateRegistration(r) {
   };
 }
 
+// Decorate many registrations at once. Fetches every player/team/tournament
+// ONCE up front instead of once per row — for N registrations that's 3 total
+// queries instead of up to 3N, which over a network database is the
+// difference between instant and multi-second.
+export async function decorateRegistrations(rows) {
+  if (!rows.length) return [];
+  const [players, teams, tournaments] = await Promise.all([
+    readSheet(SHEETS.Players),
+    readSheet(SHEETS.Teams),
+    readSheet(SHEETS.Tournaments),
+  ]);
+  const playerById = new Map(players.map((p) => [p.id, p]));
+  const teamById = new Map(teams.map((t) => [t.id, t]));
+  const tournamentById = new Map(tournaments.map((t) => [t.id, t]));
+  return rows.map((r) => {
+    const team = r.teamId ? teamById.get(r.teamId) : null;
+    const player = r.playerId ? playerById.get(r.playerId) : null;
+    return {
+      ...r,
+      tournamentName: tournamentById.get(r.tournamentId)?.name || "",
+      participant: team ? team.name : fullName(player),
+    };
+  });
+}
+
 export async function listRegistrationsDecorated() {
   const rows = await listRegistrations();
-  return Promise.all(rows.map(decorateRegistration));
+  return decorateRegistrations(rows);
 }
 
 // Player ids already added to a tournament (used to avoid duplicates + to build teams).

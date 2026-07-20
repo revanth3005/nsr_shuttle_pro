@@ -427,6 +427,7 @@ function Standings({ rows, leagueDone, onView }) {
                 <th className="py-2 pr-3">W</th>
                 <th className="py-2 pr-3">L</th>
                 <th className="py-2 pr-3">Set +/−</th>
+                <th className="py-2 pr-3" title="Net Points Rate — (points scored − points conceded) ÷ sets played. Tie-breaker used only if Wins, Set +/− and Points are all tied.">NPR</th>
                 <th className="py-2 pr-3">Pts</th>
                 <th className="py-2"></th>
               </tr>
@@ -440,6 +441,9 @@ function Standings({ rows, leagueDone, onView }) {
                   <td className="py-2 pr-3">{r.wins}</td>
                   <td className="py-2 pr-3">{r.losses}</td>
                   <td className="py-2 pr-3">{r.setDiff > 0 ? `+${r.setDiff}` : r.setDiff}</td>
+                  <td className="py-2 pr-3 text-muted-foreground">
+                    {r.netPointsRate == null ? "—" : r.netPointsRate > 0 ? `+${r.netPointsRate.toFixed(2)}` : r.netPointsRate.toFixed(2)}
+                  </td>
                   <td className="py-2 pr-3 font-semibold">{r.points}</td>
                   <td className="py-2 text-right">
                     <button
@@ -455,8 +459,11 @@ function Standings({ rows, leagueDone, onView }) {
             </tbody>
           </table>
         </div>
+        <p className="mt-3 text-xs text-muted-foreground">
+          Ranked by <b>Wins</b>, then <b>Set +/−</b>, then <b>Points</b>, then <b>NPR</b> (Net Points Rate) if still tied.
+        </p>
         {leagueDone && rows.length >= 3 && (
-          <p className="mt-3 text-xs text-muted-foreground">
+          <p className="mt-1 text-xs text-muted-foreground">
             Playoffs: <b>Qualifier 1</b> = #1 vs #2 (winner → Final). <b>Semi Final</b> = Qualifier 1 loser vs #3.
             <b> Final</b> = Qualifier 1 winner vs Semi Final winner.
           </p>

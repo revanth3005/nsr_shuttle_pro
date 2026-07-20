@@ -29,15 +29,6 @@ async function resolvePlayerIds(sideId) {
   return [];
 }
 
-// Did this player (individually) win the given match — handles both Singles
-// (winnerId is the player) and Doubles (winnerId is their team) transparently.
-export async function didPlayerWin(match, playerId) {
-  if (!match?.winnerId) return false;
-  if (String(match.winnerId) === String(playerId)) return true;
-  const team = await getTeam(match.winnerId);
-  return !!team && (String(team.player1Id) === String(playerId) || String(team.player2Id) === String(playerId));
-}
-
 export async function listMatches() {
   return readSheet(SHEETS.Matches);
 }
@@ -52,20 +43,21 @@ export async function getMatch(id) {
 
 // Matches involving a given player — either directly (Singles, side id is the
 // player) or via their doubles team (side id is the team, so we check team
-// membership too).
+// membership too). Teams are fetched ONCE (1 query) instead of once per
+// match per side — this runs on every player dashboard load.
 export async function matchesForPlayer(playerId) {
-  const all = await listMatches();
-  const onTeam = async (teamId) => {
-    const t = await getTeam(teamId);
+  const [all, teams] = await Promise.all([listMatches(), readSheet(SHEETS.Teams)]);
+  const teamById = new Map(teams.map((t) => [t.id, t]));
+  const onTeam = (teamId) => {
+    const t = teamById.get(teamId);
     return !!t && (String(t.player1Id) === String(playerId) || String(t.player2Id) === String(playerId));
   };
-  const flags = await Promise.all(
-    all.map(async (m) => {
-      if (String(m.side1Id) === String(playerId) || String(m.side2Id) === String(playerId)) return true;
-      return (await onTeam(m.side1Id)) || (await onTeam(m.side2Id));
-    })
+  return all.filter((m) =>
+    String(m.side1Id) === String(playerId) ||
+    String(m.side2Id) === String(playerId) ||
+    onTeam(m.side1Id) ||
+    onTeam(m.side2Id)
   );
-  return all.filter((_, i) => flags[i]);
 }
 
 export async function createMatch(data) {

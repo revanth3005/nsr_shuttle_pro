@@ -139,9 +139,13 @@ export async function deleteRow(name, id) {
 }
 
 // Replace an entire table's contents — used by engines that recompute a whole
-// sheet at once (e.g. rankings, player stat resync).
+// sheet at once (e.g. rankings, player stat resync). Only reads the current
+// rows when actually needed (i.e. computeRows is a transform function) — a
+// caller that already has the full row set can pass it directly and skip
+// that round trip entirely.
 export async function replaceSheet(name, computeRows) {
+  if (typeof computeRows !== "function") return writeSheet(name, computeRows);
   const current = await readSheet(name);
-  const rows = typeof computeRows === "function" ? await computeRows(current) : computeRows;
+  const rows = await computeRows(current);
   return writeSheet(name, rows);
 }

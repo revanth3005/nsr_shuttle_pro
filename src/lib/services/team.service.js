@@ -10,14 +10,16 @@ export async function listTeams() {
 
 export async function teamsForTournament(tournamentId) {
   const rows = await filter(SHEETS.Teams, (t) => String(t.tournamentId) === String(tournamentId));
-  return Promise.all(rows.map(decorateTeam));
+  return decorateTeams(rows);
 }
 
 export async function getTeam(id) {
   return findById(SHEETS.Teams, id);
 }
 
-// Enrich a team with resolved player names for display.
+// Enrich a team with resolved player names for display. Prefer
+// decorateTeams() for a list — this does 2 queries every call, which adds up
+// fast over a network database when done once per row in a loop.
 export async function decorateTeam(team) {
   if (!team) return null;
   const [p1, p2] = await Promise.all([getPlayer(team.player1Id), getPlayer(team.player2Id)]);
@@ -28,9 +30,22 @@ export async function decorateTeam(team) {
   };
 }
 
+// Decorate many teams at once — fetches every player ONCE (1 query) instead
+// of 2 queries per team.
+export async function decorateTeams(teams) {
+  if (!teams.length) return [];
+  const players = await readSheet(SHEETS.Players);
+  const playerById = new Map(players.map((p) => [p.id, p]));
+  return teams.map((team) => ({
+    ...team,
+    player1Name: fullName(playerById.get(team.player1Id)),
+    player2Name: fullName(playerById.get(team.player2Id)),
+  }));
+}
+
 export async function listTeamsWithNames() {
   const rows = await listTeams();
-  return Promise.all(rows.map(decorateTeam));
+  return decorateTeams(rows);
 }
 
 export async function createTeam(data) {
@@ -71,7 +86,10 @@ function shuffle(arr) {
 // Randomly pair the tournament's participant players into doubles teams.
 // Replaces any existing teams for the tournament. An odd player is left unpaired.
 export async function generateRandomTeams(tournamentId) {
-  const regs = await registrationsForTournament(tournamentId);
+  const [regs, allPlayers] = await Promise.all([
+    registrationsForTournament(tournamentId),
+    readSheet(SHEETS.Players),
+  ]);
   const playerIds = regs.filter((r) => r.playerId).map((r) => r.playerId);
 
   if (playerIds.length < 2) {
@@ -79,6 +97,7 @@ export async function generateRandomTeams(tournamentId) {
     err.status = 400;
     throw err;
   }
+  const playerById = new Map(allPlayers.map((p) => [p.id, p]));
 
   // Clear existing teams for this tournament first.
   const existing = await filter(SHEETS.Teams, (t) => String(t.tournamentId) === String(tournamentId));
@@ -87,7 +106,8 @@ export async function generateRandomTeams(tournamentId) {
   const shuffled = shuffle(playerIds);
   const teams = [];
   for (let i = 0; i + 1 < shuffled.length; i += 2) {
-    const [p1, p2] = await Promise.all([getPlayer(shuffled[i]), getPlayer(shuffled[i + 1])]);
+    const p1 = playerById.get(shuffled[i]);
+    const p2 = playerById.get(shuffled[i + 1]);
     teams.push({
       id: genId("TM"),
       name: `${fullName(p1)} / ${fullName(p2)}`,

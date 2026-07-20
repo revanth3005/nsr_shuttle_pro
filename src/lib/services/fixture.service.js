@@ -1,8 +1,6 @@
-import { insertRows, filter, updateRow, deleteRow } from "../excel/store.js";
+import { insertRows, filter, updateRow, deleteRow, readSheet } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, fullName } from "../utils.js";
-import { getPlayer } from "./player.service.js";
-import { getTeam } from "./team.service.js";
 import { fixtureParticipants } from "./registration.service.js";
 import { getTournament } from "./tournament.service.js";
 
@@ -28,31 +26,35 @@ function roundName(slots) {
   return KO_ROUND_NAMES[slots] || `Round of ${slots}`;
 }
 
-// Resolve a raw side id (player or team) to a display name — used when the
-// knockout engine advances a winner into the next round's placeholder.
-async function resolveName(id) {
-  if (!id) return "TBD";
-  const p = await getPlayer(id);
-  if (p) return fullName(p);
-  const t = await getTeam(id);
-  if (t) return t.name;
-  return String(id);
-}
-
 function nextPowerOfTwo(n) {
   let p = 1;
   while (p < n) p *= 2;
   return p;
 }
 
-async function sideName(participant) {
-  if (!participant) return "BYE";
-  if (participant.isTeam) {
-    const t = await getTeam(participant.id);
-    return t?.name || "Team";
-  }
-  const p = await getPlayer(participant.id);
-  return fullName(p) || "Player";
+// Build in-memory player/team lookup maps ONCE per call, instead of querying
+// the database for every single participant while building a bracket. Over a
+// network database, resolving 8+ participants one row at a time is the
+// difference between a bracket generating instantly and taking many seconds.
+async function buildLookup() {
+  const [players, teams] = await Promise.all([readSheet(SHEETS.Players), readSheet(SHEETS.Teams)]);
+  const playerById = new Map(players.map((p) => [p.id, p]));
+  const teamById = new Map(teams.map((t) => [t.id, t]));
+  return {
+    resolveName: (id) => {
+      if (!id) return "TBD";
+      const p = playerById.get(id);
+      if (p) return fullName(p);
+      const t = teamById.get(id);
+      if (t) return t.name;
+      return String(id);
+    },
+    sideName: (participant) => {
+      if (!participant) return "BYE";
+      if (participant.isTeam) return teamById.get(participant.id)?.name || "Team";
+      return fullName(playerById.get(participant.id)) || "Player";
+    },
+  };
 }
 
 function shuffle(arr) {
@@ -65,8 +67,7 @@ function shuffle(arr) {
   return a;
 }
 
-async function makeMatch(tournamentId, round, court, s1, s2) {
-  const [name1, name2] = await Promise.all([sideName(s1), sideName(s2)]);
+function makeMatch(tournamentId, round, court, s1, s2, lookup) {
   return {
     id: genId("MTC"),
     tournamentId,
@@ -76,8 +77,8 @@ async function makeMatch(tournamentId, round, court, s1, s2) {
     matchTime: "",
     side1Id: s1?.id || "",
     side2Id: s2?.id || "",
-    side1Name: name1,
-    side2Name: name2,
+    side1Name: lookup.sideName(s1),
+    side2Name: lookup.sideName(s2),
     set1: "",
     set2: "",
     set3: "",
@@ -93,7 +94,7 @@ async function makeMatch(tournamentId, round, court, s1, s2) {
 // power of two — byes auto-win immediately). Every later round (Quarter
 // Finals, Semi Finals, Final, ...) is created as a "TBD vs TBD" placeholder;
 // advanceKnockout() fills each one in as the round before it finishes.
-async function generateKnockout(tournamentId, participants) {
+function generateKnockout(tournamentId, participants, lookup) {
   const n = participants.length;
   const size = nextPowerOfTwo(n || 2);
   const shuffled = shuffle(participants);
@@ -111,7 +112,7 @@ async function generateKnockout(tournamentId, participants) {
   const matches = [];
   let court = 1;
   for (let i = 0; i < slots.length; i += 2) {
-    matches.push(await makeMatch(tournamentId, roundName(size), `Court ${court}`, slots[i], slots[i + 1]));
+    matches.push(makeMatch(tournamentId, roundName(size), `Court ${court}`, slots[i], slots[i + 1], lookup));
     court = (court % 4) + 1;
   }
 
@@ -132,6 +133,7 @@ export async function advanceKnockout(tournamentId) {
   const t = await getTournament(tournamentId);
   if (!t || t.format !== "Knockout") return { stage: "n/a", advanced: 0 };
 
+  const lookup = await buildLookup();
   let totalAdvanced = 0;
   for (let pass = 0; pass < KO_ROUND_ORDER.length; pass++) {
     const all = await filter(SHEETS.Matches, (m) => String(m.tournamentId) === String(tournamentId));
@@ -149,12 +151,11 @@ export async function advanceKnockout(tournamentId) {
         const b = curr[2 * k + 1];
         const isDone = (m) => m && (m.status === "Completed" || m.status === "Walkover") && m.winnerId;
         if (!isDone(a) || !isDone(b)) continue;
-        const [name1, name2] = await Promise.all([resolveName(a.winnerId), resolveName(b.winnerId)]);
         await updateRow(SHEETS.Matches, nm.id, {
           side1Id: a.winnerId,
           side2Id: b.winnerId,
-          side1Name: name1,
-          side2Name: name2,
+          side1Name: lookup.resolveName(a.winnerId),
+          side2Name: lookup.resolveName(b.winnerId),
         });
         advancedThisPass++;
       }
@@ -166,7 +167,7 @@ export async function advanceKnockout(tournamentId) {
 }
 
 // Round Robin: everyone plays everyone (circle method).
-async function generateRoundRobin(tournamentId, participants) {
+function generateRoundRobin(tournamentId, participants, lookup) {
   const players = [...participants];
   if (players.length % 2 !== 0) players.push(null); // bye marker
   const n = players.length;
@@ -180,7 +181,7 @@ async function generateRoundRobin(tournamentId, participants) {
       const a = arr[i];
       const b = arr[n - 1 - i];
       if (a && b) {
-        matches.push(await makeMatch(tournamentId, `Round ${r + 1}`, `Court ${court}`, a, b));
+        matches.push(makeMatch(tournamentId, `Round ${r + 1}`, `Court ${court}`, a, b, lookup));
         court = (court % 4) + 1;
       }
     }
@@ -192,8 +193,8 @@ async function generateRoundRobin(tournamentId, participants) {
 
 // League + Knockout: a round-robin group stage. Knockout is generated later
 // (after standings are known) via generateKnockoutFromQualifiers.
-async function generateLeaguePlusKnockout(tournamentId, participants) {
-  return generateRoundRobin(tournamentId, participants);
+function generateLeaguePlusKnockout(tournamentId, participants, lookup) {
+  return generateRoundRobin(tournamentId, participants, lookup);
 }
 
 // Placeholder for a not-yet-determined playoff match. Sides are filled in
@@ -263,20 +264,21 @@ export async function generateFixtures(tournamentId) {
   const existing = await filter(SHEETS.Matches, (m) => String(m.tournamentId) === String(tournamentId));
   for (const m of existing) await deleteRow(SHEETS.Matches, m.id);
 
+  const lookup = await buildLookup();
   let matches;
   switch (t.format) {
     case "Round Robin":
-      matches = await generateRoundRobin(tournamentId, participants);
+      matches = generateRoundRobin(tournamentId, participants, lookup);
       matches.push(...generatePlayoffPlaceholders(tournamentId, participants.length));
       break;
     case "League":
     case "League + Knockout":
-      matches = await generateLeaguePlusKnockout(tournamentId, participants);
+      matches = generateLeaguePlusKnockout(tournamentId, participants, lookup);
       matches.push(...generatePlayoffPlaceholders(tournamentId, participants.length));
       break;
     case "Knockout":
     default:
-      matches = await generateKnockout(tournamentId, participants);
+      matches = generateKnockout(tournamentId, participants, lookup);
       break;
   }
 

@@ -35,16 +35,19 @@ export function normalizeValue(v) {
   return v;
 }
 
-let _client = null;
+// Cached on globalThis (not a plain module-level `let`) because Next.js dev
+// mode can give different route bundles their own instance of this module —
+// a plain module-level singleton would then re-init per route. globalThis is
+// shared across the whole Node process regardless of module instance.
 export function getClient() {
-  if (_client) return _client;
+  if (globalThis.__tursoClient) return globalThis.__tursoClient;
   if (!DB_CONFIG.url) {
     throw new Error(
       "Turso database is not configured yet — fill in src/config/db.config.js (url + authToken), then restart the server."
     );
   }
-  _client = createClient({ url: DB_CONFIG.url, authToken: DB_CONFIG.authToken });
-  return _client;
+  globalThis.__tursoClient = createClient({ url: DB_CONFIG.url, authToken: DB_CONFIG.authToken });
+  return globalThis.__tursoClient;
 }
 
 function createTableSql(table) {
@@ -54,39 +57,38 @@ function createTableSql(table) {
   return `CREATE TABLE IF NOT EXISTS ${quoteIdent(table)} (${colDefs.join(", ")})`;
 }
 
-async function insertRowRaw(client, table, row) {
+function insertRowStatement(table, row) {
   const cols = COLUMNS[table];
-  await client.execute({
+  return {
     sql: `INSERT INTO ${quoteIdent(table)} (${cols.map(quoteIdent).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
     args: cols.map((c) => normalizeValue(row[c])),
-  });
+  };
 }
 
 // Create every table (if missing) and seed demo data the first time the
-// database is empty (Users table has zero rows). Cached per warm process so
-// repeated calls within the same server instance are free.
-let schemaReady = null;
+// database is empty (Users table has zero rows). Cached on globalThis (see
+// getClient above) so this genuinely runs once per server process — not once
+// per route module instance. All CREATE TABLEs go in a single batch (1 round
+// trip instead of 11); the one-time seed insert is also a single batch across
+// every table's rows instead of one round trip per row.
 export function ensureSchema() {
-  if (schemaReady) return schemaReady;
-  schemaReady = (async () => {
+  if (globalThis.__schemaReady) return globalThis.__schemaReady;
+  globalThis.__schemaReady = (async () => {
     const client = getClient();
-    for (const table of Object.values(SHEETS)) {
-      await client.execute(createTableSql(table));
-    }
+    await client.batch(Object.values(SHEETS).map((table) => createTableSql(table)), "write");
 
     const { rows } = await client.execute(`SELECT COUNT(*) as count FROM ${quoteIdent(SHEETS.Users)}`);
     const count = Number(rows[0]?.count || 0);
     if (count === 0) {
       const data = buildSeedData();
-      for (const table of Object.values(SHEETS)) {
-        for (const row of data[table] || []) {
-          await insertRowRaw(client, table, row);
-        }
-      }
+      const statements = Object.values(SHEETS).flatMap((table) =>
+        (data[table] || []).map((row) => insertRowStatement(table, row))
+      );
+      if (statements.length) await client.batch(statements, "write");
     }
   })().catch((err) => {
-    schemaReady = null; // allow retry on next call instead of caching a failure
+    globalThis.__schemaReady = null; // allow retry on next call instead of caching a failure
     throw err;
   });
-  return schemaReady;
+  return globalThis.__schemaReady;
 }
