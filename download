@@ -1,0 +1,17 @@
+node_modules
+.next
+out
+build
+.DS_Store
+*.log
+.env
+.env.local
+# The Excel data store is generated at runtime / via `npm run seed`.
+/data/*.xlsx
+# Local SQLite fallback database (dev only — prod uses Turso).
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+# Turso embedded replica (generated, re-syncs from the hosted database).
+/data/turso-replica.db*
