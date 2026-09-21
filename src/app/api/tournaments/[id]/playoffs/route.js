@@ -2,6 +2,7 @@ import { handler, ok } from "@/lib/api";
 import { requireUser, requireRole } from "@/lib/auth/session";
 import { ROLES } from "@/lib/excel/schema";
 import { playoffState, advancePlayoffs } from "@/lib/services/playoff.service";
+import { advanceGroupStage } from "@/lib/services/fixture.service";
 import { logAudit } from "@/lib/services/audit.service";
 
 export const runtime = "nodejs";
@@ -17,7 +18,11 @@ export const GET = handler(async (_req, { params }) => {
 export const POST = handler(async (_req, { params }) => {
   const user = await requireRole(ROLES.SUPER_ADMIN, ROLES.ORGANIZER);
   const { id } = await params;
-  const result = await advancePlayoffs(id);
+  // Group + Knockout builds a bracket from the pool qualifiers; every other
+  // league format creates the next Page playoff stage. Only one of the two
+  // ever does anything for a given tournament.
+  const [group, playoff] = [await advanceGroupStage(id), await advancePlayoffs(id)];
+  const result = group.advanced ? group : playoff;
   await logAudit({ userId: user.id, userName: user.name, action: "PLAYOFF_ADVANCE", entity: "Tournament", details: { id, ...result } });
   return ok(result);
 });

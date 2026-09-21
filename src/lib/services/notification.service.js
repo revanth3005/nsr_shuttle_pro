@@ -1,4 +1,4 @@
-import { insertRow, insertRows, updateRow, filter } from "../excel/store.js";
+import { insertRow, insertRows, updateRow, filter, where } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, nowIso } from "../utils.js";
 
@@ -30,7 +30,7 @@ export async function notifyMany(userIds, type, title, message) {
 }
 
 export async function listForUser(userId) {
-  const rows = await filter(SHEETS.Notifications, (n) => String(n.userId) === String(userId));
+  const rows = await where(SHEETS.Notifications, { userId });
   return rows.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 

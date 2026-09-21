@@ -1,4 +1,5 @@
-import { readSheet, writeSheet, replaceSheet } from "../excel/store.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { readSheet, writeSheet } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, nowIso, pct, fullName } from "../utils.js";
 import { getPointsMap, pointsForRound } from "./points.service.js";
@@ -53,6 +54,7 @@ async function computePlayerStatsFromMatches() {
   const stats = {};
   const ensure = (id) => (stats[id] = stats[id] || { matchesPlayed: 0, wins: 0, losses: 0, points: 0, titles: 0 });
 
+
   for (const m of matches) {
     const final = isFinalRound(m.round);
     const winnerIds = resolvePlayerIds(m.winnerId);
@@ -71,26 +73,9 @@ async function computePlayerStatsFromMatches() {
       s.points += pointsForRound(m.round, false, cfg);
     }
   }
-  return stats;
-}
-
-// Returns the freshly-updated player rows so callers can reuse them directly
-// instead of reading the Players table again right after writing it.
-async function syncPlayerStats() {
-  const stats = await computePlayerStatsFromMatches();
-  return replaceSheet(SHEETS.Players, (players) =>
-    players.map((p) => {
-      const s = stats[p.id];
-      return {
-        ...p,
-        matchesPlayed: s ? s.matchesPlayed : 0,
-        wins: s ? s.wins : 0,
-        losses: s ? s.losses : 0,
-        currentPoints: s ? s.points : 0,
-        titlesWon: s ? s.titles : 0,
-      };
-    })
-  );
+  // allPlayers was already fetched above — hand it back so the caller doesn't
+  // pay for a second read of the same table.
+  return { stats, players: allPlayers };
 }
 
 function rankingScore(p) {
@@ -107,12 +92,52 @@ function rankGroup(players) {
     .map((p, i) => ({ ...p, rank: i + 1 }));
 }
 
+// Recomputing rankings replays the entire Matches table and rewrites both the
+// Players and Rankings tables — by far the most expensive thing the app does.
+// A single "record result" request used to trigger it several times over
+// (recordResult itself, then again from every updateMatch the playoff engine
+// made while filling in the next round). Against a network database that is
+// seconds of pure waiting.
+//
+// withDeferredRankings() collapses all of that into ONE recompute at the end
+// of the request. AsyncLocalStorage scopes the flag to the current async
+// context, so two requests running concurrently can never defer each other's
+// work — a plain module-level flag would let request A swallow request B's
+// recalculation and leave B's results unranked.
+const deferStore = new AsyncLocalStorage();
+
+export async function withDeferredRankings(fn) {
+  const store = { dirty: false };
+  const result = await deferStore.run(store, fn);
+  if (store.dirty) await runRecalculateRankings();
+  return result;
+}
+
+export async function recalculateRankings() {
+  const store = deferStore.getStore();
+  if (store) {
+    store.dirty = true; // someone up the stack will run it once, at the end
+    return null;
+  }
+  return runRecalculateRankings();
+}
+
 // Resync every player's stats from the match log, then rebuild the Rankings
 // sheet from those fresh stats across all scopes (Overall/State/Club/Yearly).
-export async function recalculateRankings() {
-  // syncPlayerStats already returns the freshly-written rows — reuse them
-  // directly instead of reading the Players table a second time.
-  const players = await syncPlayerStats();
+async function runRecalculateRankings() {
+  // One pass over the match log gives both the stats and the Players rows.
+  const { stats, players: current } = await computePlayerStatsFromMatches();
+  const players = current.map((p) => {
+    const st = stats[p.id];
+    return {
+      ...p,
+      matchesPlayed: st ? st.matchesPlayed : 0,
+      wins: st ? st.wins : 0,
+      losses: st ? st.losses : 0,
+      currentPoints: st ? st.points : 0,
+      titlesWon: st ? st.titles : 0,
+    };
+  });
   const year = new Date().getFullYear();
   const rows = [];
 
@@ -160,15 +185,19 @@ export async function recalculateRankings() {
   // Yearly (current year snapshot mirrors overall)
   build("Yearly", String(year), players);
 
-  // Direct writes (not replaceSheet) — we already have the full row set in
-  // memory, so there's no need to read the table again just to discard it.
-  await writeSheet(SHEETS.Rankings, rows);
-
-  // Also write each player's overall rank back onto the Players sheet.
+  // Players is written ONCE, with stats and overall rank together. It used to
+  // be fully deleted and re-inserted twice per recompute — once for the stats
+  // and again for the rank — which on a network database doubled the cost of
+  // the single most expensive write in the app for no reason.
   const overall = rankGroup(players);
   const rankById = Object.fromEntries(overall.map((p) => [p.id, p.rank]));
   const withRank = players.map((p) => ({ ...p, currentRanking: rankById[p.id] ?? p.currentRanking ?? 0 }));
-  await writeSheet(SHEETS.Players, withRank);
+
+  // Independent tables, so both writes can go out at the same time.
+  await Promise.all([
+    writeSheet(SHEETS.Rankings, rows),
+    writeSheet(SHEETS.Players, withRank),
+  ]);
 
   return rows;
 }

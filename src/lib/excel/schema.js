@@ -48,7 +48,7 @@ export const COLUMNS = {
   Matches: [
     "id", "tournamentId", "round", "court", "matchDate", "matchTime",
     "side1Id", "side2Id", "side1Name", "side2Name", "set1", "set2", "set3",
-    "winnerId", "loserId", "duration", "status",
+    "winnerId", "loserId", "duration", "status", "groupName",
   ],
   Rankings: [
     "id", "scope", "scopeValue", "playerId", "playerName", "club", "state",
@@ -98,7 +98,23 @@ export const TOURNAMENT_FORMATS = [
   "Round Robin",
   "League",
   "League + Knockout",
+  "Group + Knockout",
 ];
+
+// Group stage settings. Participants are split into pools of TARGET_GROUP_SIZE
+// (balanced, so 10 entrants become 4/3/3 rather than 4/4/2), everyone plays
+// everyone inside their own pool, and the top QUALIFIERS_PER_GROUP of each
+// pool go through to the knockout bracket.
+export const GROUP_STAGE = {
+  TARGET_GROUP_SIZE: 4,
+  QUALIFIERS_PER_GROUP: 2,
+};
+
+// "Group A", "Group B", ... — index 0-25. Past 26 pools it falls back to
+// "Group 27", which is far beyond any realistic draw but keeps names unique.
+export function groupLabel(index) {
+  return index < 26 ? `Group ${String.fromCharCode(65 + index)}` : `Group ${index + 1}`;
+}
 
 export const TOURNAMENT_STATUS = [
   "Draft",

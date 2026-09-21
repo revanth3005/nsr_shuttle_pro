@@ -1,7 +1,7 @@
-import { readSheet, findById, insertRow, updateRow, deleteRow, filter } from "../excel/store.js";
+import { readSheet, findById, insertRow, updateRow, deleteRow, filter, where } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, fullName } from "../utils.js";
-import { recalculateRankings } from "./ranking.service.js";
+import { recalculateRankings, withDeferredRankings } from "./ranking.service.js";
 import { getPlayer } from "./player.service.js";
 import { getTeam } from "./team.service.js";
 import { notify } from "./notification.service.js";
@@ -10,9 +10,8 @@ import { getUserForPlayer } from "./user-lookup.js";
 // Resolve a side id (player or team) to a display name.
 async function resolveSideName(id) {
   if (!id) return "";
-  const p = await getPlayer(id);
+  const [p, t] = await Promise.all([getPlayer(id), getTeam(id)]);
   if (p) return fullName(p);
-  const t = await getTeam(id);
   if (t) return t.name;
   return String(id);
 }
@@ -23,8 +22,10 @@ async function resolveSideName(id) {
 // by ranking.service's recalculateRankings (see that file for why).
 async function resolvePlayerIds(sideId) {
   if (!sideId) return [];
-  if (await getPlayer(sideId)) return [sideId];
-  const team = await getTeam(sideId);
+  // A side id is either a player or a team — ask both at once rather than
+  // waiting for the player lookup to miss before starting the team lookup.
+  const [player, team] = await Promise.all([getPlayer(sideId), getTeam(sideId)]);
+  if (player) return [sideId];
   if (team) return [team.player1Id, team.player2Id].filter(Boolean);
   return [];
 }
@@ -34,7 +35,7 @@ export async function listMatches() {
 }
 
 export async function matchesForTournament(tournamentId) {
-  return filter(SHEETS.Matches, (m) => String(m.tournamentId) === String(tournamentId));
+  return where(SHEETS.Matches, { tournamentId });
 }
 
 export async function getMatch(id) {
@@ -123,6 +124,17 @@ async function notifyResult(playerId, title, message) {
   if (user) await notify(user.id, "Match Result Published", title, message);
 }
 
+// Notify every player on both sides concurrently. Previously each call read
+// the entire Users table and they ran one after another, so a doubles match
+// meant four sequential full-table reads before the response could return.
+async function notifySides(winnerPlayers, loserPlayers, merged, round) {
+  const score = `${merged.set1 || ""} ${merged.set2 || ""} ${merged.set3 || ""}`.trim();
+  await Promise.all([
+    ...winnerPlayers.map((pid) => notifyResult(pid, "You won your match!", `Result: ${score}`)),
+    ...loserPlayers.map((pid) => notifyResult(pid, "Match result published", `Result recorded for your ${round} match.`)),
+  ]);
+}
+
 // Delete a match, then resync every player's stats/rankings from what's left
 // in the Matches sheet — so deleting a scored match (or a bye/walkover) never
 // leaves stale points behind, for any tournament type.
@@ -139,7 +151,12 @@ export async function removeMatch(id) {
 // every player's matchesPlayed/wins/losses/points/titles by replaying the
 // entire Matches sheet, so editing a completed match's score, or re-scoring
 // it differently, can never double-count or drift.
-export async function recordResult(id, { set1, set2, set3, status, duration, court, matchDate, matchTime }) {
+export async function recordResult(id, payload) {
+  // One recompute for the whole request instead of one per internal write.
+  return withDeferredRankings(() => recordResultInner(id, payload));
+}
+
+async function recordResultInner(id, { set1, set2, set3, status, duration, court, matchDate, matchTime }) {
   const match = await findById(SHEETS.Matches, id);
   if (!match) {
     const err = new Error("Match not found");
@@ -174,15 +191,12 @@ export async function recordResult(id, { set1, set2, set3, status, duration, cou
   await recalculateRankings();
 
   if (patch.winnerId) {
-    const winnerPlayers = await resolvePlayerIds(patch.winnerId);
-    const loserPlayers = await resolvePlayerIds(patch.loserId);
+    const [winnerPlayers, loserPlayers] = await Promise.all([
+      resolvePlayerIds(patch.winnerId),
+      resolvePlayerIds(patch.loserId),
+    ]);
 
-    for (const pid of winnerPlayers) {
-      await notifyResult(pid, "You won your match!", `Result: ${merged.set1 || ""} ${merged.set2 || ""} ${merged.set3 || ""}`.trim());
-    }
-    for (const pid of loserPlayers) {
-      await notifyResult(pid, "Match result published", `Result recorded for your ${match.round} match.`);
-    }
+    await notifySides(winnerPlayers, loserPlayers, merged, match.round);
 
     // Auto-advance the league playoff (Qualifier 1 -> Semi Final -> Final) or
     // the knockout bracket (winner into the next round's placeholder) as
@@ -199,6 +213,15 @@ export async function recordResult(id, { set1, set2, set3, status, duration, cou
       await advanceKnockout(match.tournamentId);
     } catch (e) {
       console.error("[KNOCKOUT] advance failed", e.message);
+    }
+    // Group + Knockout: once every pool fixture is decided, build the bracket
+    // from the qualifiers. No-op while pools are still running, and it never
+    // rebuilds a bracket that already exists.
+    try {
+      const { advanceGroupStage } = await import("./fixture.service.js");
+      await advanceGroupStage(match.tournamentId);
+    } catch (e) {
+      console.error("[GROUPS] advance failed", e.message);
     }
   }
 
