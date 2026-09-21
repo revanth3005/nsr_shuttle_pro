@@ -2,8 +2,9 @@
 
 A production-style, full-stack Badminton Tournament Management application built with
 **Next.js (App Router)**, **JavaScript**, **TailwindCSS**, ShadCN-style UI, **React Query**,
-**AG Grid** and **Recharts** — using a **single Excel workbook as the only data store**
-(no database).
+**AG Grid** and **Recharts** — on a **libSQL/SQLite** data store: a hosted **Turso**
+database in production, and a plain local **SQLite file** in development (automatic,
+no setup).
 
 ---
 
@@ -49,13 +50,27 @@ Next.js Full-Stack App
 > Demo data (accounts, players, clubs, tournaments) is generated automatically on
 > first run — see `src/lib/excel/seed-data.js`.
 
-### Excel data layer (`src/lib/excel/store.js`)
+### Data layer (`src/lib/excel/store.js`)
 Reusable primitives: `readSheet`, `writeSheet`, `insertRow(s)`, `updateRow`, `deleteRow`,
-`search`, `filter`, `aggregate`, `replaceSheet`.
+`search`, `filter`, `aggregate`, `replaceSheet` — all async, all backed by SQL.
 
-**Safe writes / no corruption**: every mutation runs through an in-process serial
-**write queue** (one write at a time) and is persisted **atomically** (write to a temp
-file, then rename). Reads never block writes.
+### Database: Turso in prod, a local file in dev
+Both are libSQL, so the schema, the SQL and `store.js` are **identical** either way —
+only the connection URL differs. Resolution order (`src/config/db.config.js`):
+
+| # | Source | Used when |
+|---|--------|-----------|
+| 1 | `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` env vars | **Production** |
+| 2 | Hardcoded values in `src/config/db.config.js` | If you prefer paste-and-go |
+| 3 | Local SQLite file at `data/badminton.db` | **Automatic fallback in dev** |
+
+Tables are created and demo data seeded on the first request, whichever backend is in
+use. To start completely fresh locally, delete `data/badminton.db` and restart.
+
+> **The local fallback is disabled when `NODE_ENV=production`** and no Turso URL is set —
+> the app fails with a clear error instead of starting. Most hosts (Vercel, Docker, Fly)
+> have an ephemeral filesystem, so a silent file fallback would wipe your data on every
+> deploy. Set `ALLOW_LOCAL_DB=1` to override on a host with a real persistent disk.
 
 ### Workbook: `data/badminton-data.xlsx`
 Sheets: `Users`, `Players`, `Clubs`, `Tournaments`, `Teams`, `Registrations`,
@@ -74,8 +89,8 @@ npm install
 # 2. (Optional) set a JWT secret
 cp .env.example .env    # then edit JWT_SECRET
 
-# 3. Run the dev server — the Excel workbook and demo data are
-#    created automatically on first run.
+# 3. Run the dev server. No database setup needed — it falls back to a
+#    local SQLite file (data/badminton.db), created and seeded on first run.
 npm run dev
 # open http://localhost:3000
 ```
@@ -88,10 +103,10 @@ npm run dev
 | Organizer  | organizer@shuttle.pro   | organizer123   |
 | Player     | player@shuttle.pro      | player123      |
 
-> The workbook (`data/badminton-data.xlsx`) with demo accounts and data is created
-> automatically the first time the app runs. To start completely fresh, delete that
-> file and restart — it will be re-created. You can also register a new account
-> (the first Player signup creates a linked profile).
+> The database with demo accounts and data is created automatically the first time the
+> app runs. To start completely fresh locally, delete `data/badminton.db` and restart —
+> it will be re-created. You can also register a new account (the first Player signup
+> creates a linked profile).
 
 ---
 
@@ -99,11 +114,25 @@ npm run dev
 
 ```bash
 npm run build
+
+# Production runs on Turso — set these in your host's environment:
+export TURSO_DATABASE_URL="libsql://<db>-<org>.turso.io"
+export TURSO_AUTH_TOKEN="<token>"
 npm start
 ```
 
-Ensure the `data/` directory is writable in your deployment environment (it holds the
-Excel workbook). To store data elsewhere, set `DATA_DIR` to an absolute path.
+Get the values from Turso (free tier is plenty):
+
+```bash
+turso db create shuttlepro
+turso db show shuttlepro --url       # -> TURSO_DATABASE_URL
+turso db tokens create shuttlepro    # -> TURSO_AUTH_TOKEN
+```
+
+Without `TURSO_DATABASE_URL`, a production build refuses to start rather than silently
+falling back to a local file (see the database note above). If you're self-hosting on a
+box with persistent storage and genuinely want the file, set `ALLOW_LOCAL_DB=1` and make
+sure `data/` is writable — `DATA_DIR` moves it elsewhere.
 
 ---
 
