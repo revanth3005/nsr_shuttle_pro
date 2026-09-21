@@ -1,4 +1,4 @@
-import { readSheet, findById, insertRow, insertRows, updateRow, deleteRow, filter } from "../excel/store.js";
+import { readSheet, findById, insertRow, insertRows, updateRow, deleteRow, filter, where } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, fullName } from "../utils.js";
 import { getPlayer } from "./player.service.js";
@@ -9,7 +9,7 @@ export async function listTeams() {
 }
 
 export async function teamsForTournament(tournamentId) {
-  const rows = await filter(SHEETS.Teams, (t) => String(t.tournamentId) === String(tournamentId));
+  const rows = await where(SHEETS.Teams, { tournamentId });
   return decorateTeams(rows);
 }
 
@@ -100,7 +100,7 @@ export async function generateRandomTeams(tournamentId) {
   const playerById = new Map(allPlayers.map((p) => [p.id, p]));
 
   // Clear existing teams for this tournament first.
-  const existing = await filter(SHEETS.Teams, (t) => String(t.tournamentId) === String(tournamentId));
+  const existing = await where(SHEETS.Teams, { tournamentId });
   for (const t of existing) await deleteRow(SHEETS.Teams, t.id);
 
   const shuffled = shuffle(playerIds);

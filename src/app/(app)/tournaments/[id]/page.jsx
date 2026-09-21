@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Calendar, MapPin, Trophy, Zap, Users, UsersRound, UserPlus, Trash2, Plus, Shuffle, ListOrdered, Award, Eye,
-  LayoutGrid, GitBranch, ChevronRight, Pencil, ArrowLeft,
+  LayoutGrid, GitBranch, ChevronRight, Pencil, ArrowLeft, ArrowUp, ArrowDown, ChevronsUpDown,
 } from "lucide-react";
 import {
   useTournament, useTournamentFixtures, useTournamentRegistrations, useTournamentTeams,
@@ -22,7 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogFooter } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/toast";
-import { ROLES, TOURNAMENT_STATUS, TOURNAMENT_CATEGORIES, TOURNAMENT_FORMATS } from "@/lib/excel/schema";
+import { ROLES, TOURNAMENT_STATUS, TOURNAMENT_CATEGORIES, TOURNAMENT_FORMATS, GROUP_STAGE } from "@/lib/excel/schema";
 import { formatDate, cn } from "@/lib/utils";
 
 export default function TournamentDetailPage({ params }) {
@@ -408,35 +408,111 @@ function roundOrder(round) {
   return idx ?? 900;
 }
 
-function Standings({ rows, leagueDone, onView }) {
+// Standings columns. `key` is the row field the column sorts on; `numeric`
+// decides which way the FIRST click sorts — stats sort best-first (desc),
+// names and positions sort A->Z / 1-first (asc). Clicking the same column
+// again flips the direction.
+const STANDINGS_COLUMNS = [
+  { key: "rank", label: "#", title: "Position — Wins first, then NPR" },
+  { key: "name", label: "Team / Player", title: "Sort by name" },
+  { key: "played", label: "P", numeric: true, title: "Matches played" },
+  { key: "wins", label: "W", numeric: true, title: "Matches won" },
+  { key: "losses", label: "L", numeric: true, title: "Matches lost" },
+  { key: "setDiff", label: "Set +/−", numeric: true, title: "Sets won minus sets lost" },
+  {
+    key: "netPointsRate", label: "NPR", numeric: true,
+    title: "Net Points Rate — (points scored − points conceded) ÷ sets played. The tie-breaker used when two sides have the same number of wins.",
+  },
+  { key: "points", label: "Pts", numeric: true, title: "Points (2 per win)" },
+];
+
+function sortStandings(rows, key, dir) {
+  const mult = dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const x = a[key];
+    const y = b[key];
+    if (typeof x === "string" || typeof y === "string") {
+      return String(x ?? "").localeCompare(String(y ?? "")) * mult || a.rank - b.rank;
+    }
+    // A side with no sets played yet has a null NPR — keep those rows at the
+    // bottom either way instead of letting them top an ascending sort.
+    if (x == null && y == null) return a.rank - b.rank;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (x - y) * mult || a.rank - b.rank;
+  });
+}
+
+function Standings({ rows, leagueDone, onView, format }) {
+  const isKnockout = format === "Knockout";
+
+  // A medal is a FINAL placing, so it only appears once the stage is actually
+  // decided — while matches are still being played every row just shows its
+  // current position number. Without this, whoever happened to sit in the top
+  // three mid-tournament got a 🥇/🥈/🥉, including sides that had not played a
+  // single match yet (a side on 0 wins sorts above one that has lost, because
+  // it has no negative NPR to drag it down — correct for the table, absurd as
+  // a medal). The played > 0 guard also covers a finished bracket where a bye
+  // left someone with no matches at all.
+  const medalled = (r) => leagueDone && r.rank <= 3 && r.played > 0;
+  // Default view = the server's own order (Wins, then NPR), which is exactly
+  // what `rank` ascending reproduces.
+  const [sort, setSort] = useState({ key: "rank", dir: "asc" });
+  const sorted = useMemo(() => sortStandings(rows, sort.key, sort.dir), [rows, sort]);
+
+  function toggleSort(col) {
+    setSort((s) =>
+      s.key === col.key
+        ? { key: col.key, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { key: col.key, dir: col.numeric ? "desc" : "asc" }
+    );
+  }
+
   return (
     <Card>
       <CardContent className="p-4">
         <div className="mb-2 flex items-center gap-2">
           <ListOrdered className="h-4 w-4 text-primary" />
-          <h3 className="text-sm font-semibold">League Standings</h3>
+          <h3 className="text-sm font-semibold">{isKnockout ? "Tournament Standings" : "League Standings"}</h3>
           <Badge variant={leagueDone ? "success" : "warning"}>{leagueDone ? "Complete" : "In progress"}</Badge>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-left text-muted-foreground">
               <tr className="border-b">
-                <th className="py-2 pr-3">#</th>
-                <th className="py-2 pr-3">Team / Player</th>
-                <th className="py-2 pr-3">P</th>
-                <th className="py-2 pr-3">W</th>
-                <th className="py-2 pr-3">L</th>
-                <th className="py-2 pr-3">Set +/−</th>
-                <th className="py-2 pr-3" title="Net Points Rate — (points scored − points conceded) ÷ sets played. Tie-breaker used only if Wins, Set +/− and Points are all tied.">NPR</th>
-                <th className="py-2 pr-3">Pts</th>
+                {STANDINGS_COLUMNS.map((col) => {
+                  const active = sort.key === col.key;
+                  return (
+                    <th key={col.key} className="py-2 pr-3 font-normal">
+                      <button
+                        type="button"
+                        title={`${col.title} — click to sort ${active && sort.dir === "desc" ? "ascending" : "descending"}`}
+                        onClick={() => toggleSort(col)}
+                        className={cn(
+                          "-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-accent/10 hover:text-foreground",
+                          active && "font-semibold text-foreground"
+                        )}
+                      >
+                        {col.label}
+                        {active ? (
+                          sort.dir === "asc"
+                            ? <ArrowUp className="h-3 w-3" />
+                            : <ArrowDown className="h-3 w-3" />
+                        ) : (
+                          <ChevronsUpDown className="h-3 w-3 opacity-30" />
+                        )}
+                      </button>
+                    </th>
+                  );
+                })}
                 <th className="py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} className={`border-b last:border-0 ${r.rank <= 3 ? "font-medium" : ""}`}>
-                  <td className="py-2 pr-3">{r.rank <= 3 ? ["🥇", "🥈", "🥉"][r.rank - 1] : r.rank}</td>
-                  <td className="py-2 pr-3">{r.name}</td>
+              {sorted.map((r) => (
+                <tr key={r.id} className={`border-b last:border-0 ${medalled(r) ? "font-medium" : ""}`}>
+                  <td className="py-2 pr-3">{medalled(r) ? ["🥇", "🥈", "🥉"][r.rank - 1] : r.rank}</td>
+                  <td className="py-2 pr-3">{r.name}<TieBreakTag row={r} rows={rows} /></td>
                   <td className="py-2 pr-3">{r.played}</td>
                   <td className="py-2 pr-3">{r.wins}</td>
                   <td className="py-2 pr-3">{r.losses}</td>
@@ -460,16 +536,140 @@ function Standings({ rows, leagueDone, onView }) {
           </table>
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
-          Ranked by <b>Wins</b>, then <b>Set +/−</b>, then <b>Points</b>, then <b>NPR</b> (Net Points Rate) if still tied.
+          Ranked by <b>Wins</b>, then <b>Set +/−</b>, <b>NPR</b> (Net Points Rate), <b>Point +/−</b>,
+          <b> head-to-head</b>, and finally a <b>drawing of lots</b> — the BWF order. Hover a tie-break
+          tag to see why. Click any column heading to sort ascending / descending.
         </p>
-        {leagueDone && rows.length >= 3 && (
+        {!isKnockout && leagueDone && rows.length >= 3 && (
           <p className="mt-1 text-xs text-muted-foreground">
-            Playoffs: <b>Qualifier 1</b> = #1 vs #2 (winner → Final). <b>Semi Final</b> = Qualifier 1 loser vs #3.
-            <b> Final</b> = Qualifier 1 winner vs Semi Final winner.
+            Playoffs are seeded from the <b>league stage</b> finish (which stays fixed once they start), while the
+            table above counts every match including playoffs. <b>Qualifier 1</b> = #1 vs #2 (winner → Final).
+            <b> Semi Final</b> = Qualifier 1 loser vs #3. <b>Final</b> = Qualifier 1 winner vs Semi Final winner.
           </p>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// Why a side sits where it does when it was level on matches won. Tie-breaks
+// run in BWF order: set +/−, then NPR, then point +/−, then head-to-head,
+// then a drawing of lots.
+const TIE_LABELS = {
+  "set +/-": { text: "SET", rule: "separated on set +/−" },
+  NPR: { text: "NPR", rule: "separated on NPR (Net Points Rate)" },
+  "point +/-": { text: "PTS", rule: "separated on point +/−" },
+  "head-to-head": { text: "H2H", rule: "level on set +/−, NPR and point +/− — separated on head-to-head" },
+  lot: { text: "LOT", rule: "level on every criterion — separated by a drawing of lots" },
+};
+
+const signed = (n) => (n > 0 ? `+${n}` : String(n));
+
+// The tag is only half the answer: it says a tie-break happened, not what the
+// numbers were. The tooltip spells out who was level and — when head-to-head
+// or a lot was involved — each side's record in the matches played among ONLY
+// the tied sides, which is the part a reader cannot work out from the table.
+function TieBreakTag({ row, rows }) {
+  const info = TIE_LABELS[row.decidedBy];
+  if (!info) return null;
+
+  const siblings = (rows || []).filter((r) => r.tieGroupId && r.tieGroupId === row.tieGroupId);
+  const lines = [`Level on ${row.wins} ${row.wins === 1 ? "win" : "wins"} — ${info.rule}.`];
+
+  // Only worth printing the mini-league when it actually mattered.
+  if ((row.decidedBy === "head-to-head" || row.decidedBy === "lot") && siblings.length > 1) {
+    lines.push("", `Among the ${siblings.length} level sides (these matches only):`);
+    for (const r of siblings) {
+      const h = r.h2h || { wins: 0, setDiff: 0, pointDiff: 0 };
+      lines.push(`  ${r.name}: ${h.wins}W  sets ${signed(h.setDiff)}  points ${signed(h.pointDiff)}`);
+    }
+  }
+  if (row.decidedBy === "lot") {
+    lines.push("", "The draw is fixed for this tournament — the order never changes on refresh.");
+  }
+
+  return (
+    <span
+      title={lines.join("\n")}
+      className={cn(
+        "ml-1.5 cursor-help rounded px-1 py-0.5 align-middle text-[10px] font-medium",
+        row.decidedBy === "lot" ? "bg-warning/15 text-warning" : "bg-muted text-muted-foreground"
+      )}
+    >
+      {info.text}
+    </span>
+  );
+}
+
+// Group + Knockout: one standings table per pool, side by side. Qualifying
+// positions are tinted so it is obvious at a glance who is currently going
+// through to the bracket.
+function GroupStandings({ groups, qualifiersPerGroup, onView }) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {groups.map((g) => (
+        <Card key={g.group}>
+          <CardContent className="p-4">
+            <div className="mb-2 flex items-center gap-2">
+              <LayoutGrid className="h-4 w-4 text-primary" />
+              <h3 className="text-sm font-semibold">{g.group}</h3>
+              <Badge variant={g.complete ? "success" : "warning"}>{g.complete ? "Complete" : "In progress"}</Badge>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-left text-muted-foreground">
+                  <tr className="border-b">
+                    <th className="py-2 pr-3 font-normal">#</th>
+                    <th className="py-2 pr-3 font-normal">Team / Player</th>
+                    <th className="py-2 pr-3 font-normal" title="Matches played">P</th>
+                    <th className="py-2 pr-3 font-normal" title="Wins">W</th>
+                    <th className="py-2 pr-3 font-normal" title="Losses">L</th>
+                    <th className="py-2 pr-3 font-normal" title="Net Points Rate — (points scored − points conceded) ÷ sets played">NPR</th>
+                    <th className="py-2 pr-3 font-normal" title="Points (2 per win)">Pts</th>
+                    <th className="py-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {g.rows.map((r) => {
+                    const qualifying = r.rank <= qualifiersPerGroup;
+                    return (
+                      <tr
+                        key={r.id}
+                        className={cn("border-b last:border-0", qualifying && "bg-success/5 font-medium")}
+                        title={qualifying ? "Currently qualifying for the knockout bracket" : undefined}
+                      >
+                        <td className="py-2 pr-3">{r.rank}</td>
+                        <td className="py-2 pr-3">{r.name}<TieBreakTag row={r} rows={g.rows} /></td>
+                        <td className="py-2 pr-3">{r.played}</td>
+                        <td className="py-2 pr-3">{r.wins}</td>
+                        <td className="py-2 pr-3">{r.losses}</td>
+                        <td className="py-2 pr-3 text-muted-foreground">
+                          {r.netPointsRate == null ? "—" : r.netPointsRate > 0 ? `+${r.netPointsRate.toFixed(2)}` : r.netPointsRate.toFixed(2)}
+                        </td>
+                        <td className="py-2 pr-3 font-semibold">{r.points}</td>
+                        <td className="py-2 text-right">
+                          <button
+                            className="inline-flex items-center gap-1 rounded p-1 text-muted-foreground hover:bg-accent/10 hover:text-foreground"
+                            title="View match results"
+                            onClick={() => onView?.({ id: r.id, name: r.name })}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              Top <b>{qualifiersPerGroup}</b> advance. Ranked by <b>Wins</b>, then <b>Set +/−</b>, then <b>NPR</b>,
+              then <b>head-to-head</b> (BWF order). Hover a tag to see how a tie was broken.
+            </p>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
   );
 }
 
@@ -710,7 +910,9 @@ function Fixtures({ tournamentId, canManage, isDoubles, format }) {
   const { toast } = useToast();
 
   const [resultFor, setResultFor] = useState(null);
-  const [numSets, setNumSets] = useState(3);
+  // Default to a single set — that covers most club matches. The dropdown in
+  // the result dialog switches to 2 or 3 sets whenever a match needs it.
+  const [numSets, setNumSets] = useState(1);
   const [scores, setScores] = useState({ set1: "", set2: "", set3: "" });
   const [addOpen, setAddOpen] = useState(false);
   const [mForm, setMForm] = useState({ round: "Round 1", court: "", side1Id: "", side2Id: "", matchDate: "", matchTime: "" });
@@ -759,8 +961,10 @@ function Fixtures({ tournamentId, canManage, isDoubles, format }) {
 
   function openResult(m) {
     setResultFor(m);
+    // Re-opening a scored match shows however many sets it already has;
+    // a fresh match opens on 1 set.
     const filled = [m.set1, m.set2, m.set3].filter(Boolean).length;
-    setNumSets(filled || 3);
+    setNumSets(filled || 1);
     setScores({ set1: m.set1 || "", set2: m.set2 || "", set3: m.set3 || "" });
   }
 
@@ -812,21 +1016,38 @@ function Fixtures({ tournamentId, canManage, isDoubles, format }) {
 
   if (isLoading) return <Spinner />;
 
+  const isGroupFormat = format === "Group + Knockout";
+  const allMatches = matches || [];
+  // Pool fixtures are tagged with groupName; everything else is the bracket.
+  const groupFixtures = allMatches.filter((m) => m.groupName);
+  const nonGroup = allMatches.filter((m) => !m.groupName);
+
+  // Pool fixtures listed per group, each in round order.
+  const groupMatchMap = {};
+  groupFixtures.forEach((m) => { (groupMatchMap[m.groupName] = groupMatchMap[m.groupName] || []).push(m); });
+  const groupedMatches = Object.entries(groupMatchMap).sort((a, b) => a[0].localeCompare(b[0]));
+
   const rounds = {};
-  (matches || []).forEach((m) => {
+  nonGroup.forEach((m) => {
     if (!PLAYOFF_LABELS[m.round]) (rounds[m.round] = rounds[m.round] || []).push(m);
   });
   const leagueRounds = Object.entries(rounds).sort((a, b) => roundOrder(a[0]) - roundOrder(b[0]));
-  const playoffMatches = (matches || []).filter((m) => PLAYOFF_LABELS[m.round]);
+  const playoffMatches = nonGroup.filter((m) => PLAYOFF_LABELS[m.round]);
   const target = SET_TARGETS[numSets] || 21;
 
   const koMap = {};
-  if (isKnockout) (matches || []).forEach((m) => { (koMap[m.round] = koMap[m.round] || []).push(m); });
+  if (isKnockout || isGroupFormat) nonGroup.forEach((m) => { (koMap[m.round] = koMap[m.round] || []).push(m); });
   const koRounds = KO_ROUND_ORDER.filter((name) => koMap[name]).map((name) => [name, koMap[name]]);
 
   const standings = playoffs?.standings || [];
+  const groups = playoffs?.groups || [];
+  const groupsDone = !!playoffs?.groupsComplete;
   const leagueDone = !!playoffs?.leagueComplete;
-  const showPlayoffBtn = canManage && standings.length >= 2 && !playoffMatches.length;
+  const showPlayoffBtn = canManage && standings.length >= 2 && !playoffMatches.length && !isGroupFormat;
+  // Group format: the bracket is built from the qualifiers once every pool is
+  // played. Offered as an explicit button too, since recording the last group
+  // result already triggers it automatically.
+  const showBracketBtn = canManage && isGroupFormat && groups.length > 0 && !koRounds.length;
 
   return (
     <div className="space-y-4">
@@ -839,15 +1060,75 @@ function Fixtures({ tournamentId, canManage, isDoubles, format }) {
               <Award className="h-4 w-4" /> Generate Playoffs
             </Button>
           )}
+          {showBracketBtn && (
+            <Button
+              variant="outline"
+              onClick={genPlayoffs}
+              disabled={advance.isPending || !groupsDone}
+              title={groupsDone ? "Build the knockout bracket from the group qualifiers" : "Complete every group match first"}
+            >
+              <GitBranch className="h-4 w-4" /> Build Knockout Bracket
+            </Button>
+          )}
         </div>
       )}
 
+      {groups.length > 0 && (
+        <GroupStandings
+          groups={groups}
+          qualifiersPerGroup={GROUP_STAGE.QUALIFIERS_PER_GROUP}
+          onView={setViewing}
+        />
+      )}
+
       {standings.length > 0 && (
-        <Standings rows={standings} leagueDone={leagueDone} onView={setViewing} />
+        <Standings rows={standings} leagueDone={leagueDone} onView={setViewing} format={format} />
       )}
 
       {!matches?.length ? (
         <EmptyState title="No matches yet" description={canManage ? "Add matches manually, or auto-generate them from players/teams." : "Matches haven't been published yet."} icon={Zap} />
+      ) : isGroupFormat ? (
+        <div className="space-y-8">
+          {groupedMatches.map(([group, ms]) => (
+            <div key={group}>
+              <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+                <LayoutGrid className="h-4 w-4 text-primary" /> {group}
+              </h3>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {ms.map((m) => (
+                  <MatchCard key={m.id} m={m} canManage={canManage} onEnterResult={openResult} onEdit={openEdit} onDelete={handleDelete} />
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {koRounds.length > 0 && (
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+                  <Award className="h-4 w-4 text-warning" /> Knockout Bracket
+                </h3>
+                <ViewToggle view={koView} onChange={setKoView} />
+              </div>
+              {koView === "tree" ? (
+                <KnockoutBracket rounds={koRounds} canManage={canManage} onEnterResult={openResult} onEdit={openEdit} onDelete={handleDelete} />
+              ) : (
+                <div className="space-y-6">
+                  {koRounds.map(([round, ms]) => (
+                    <div key={round}>
+                      <h4 className="mb-2 text-sm font-semibold text-muted-foreground">{round}</h4>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {ms.map((m) => (
+                          <MatchCard key={m.id} m={m} canManage={canManage} onEnterResult={openResult} onEdit={openEdit} onDelete={handleDelete} />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       ) : isKnockout ? (
         <div>
           <div className="mb-2 flex items-center justify-between">

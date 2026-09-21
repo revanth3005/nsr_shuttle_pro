@@ -1,4 +1,4 @@
-import { readSheet, insertRow, deleteRow, filter } from "../excel/store.js";
+import { readSheet, insertRow, deleteRow, filter, where } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, nowIso, fullName } from "../utils.js";
 import { getPlayer } from "./player.service.js";
@@ -13,7 +13,7 @@ export async function listRegistrations() {
 }
 
 export async function registrationsForTournament(tournamentId) {
-  return filter(SHEETS.Registrations, (r) => String(r.tournamentId) === String(tournamentId));
+  return where(SHEETS.Registrations, { tournamentId });
 }
 
 // Decorate a single registration — kept for one-off use, but callers with a
@@ -102,7 +102,7 @@ export async function fixtureParticipants(tournamentId) {
   const isDoubles = String(t?.category || "").toLowerCase().includes("doubles");
 
   if (isDoubles) {
-    const teams = await filter(SHEETS.Teams, (tm) => String(tm.tournamentId) === String(tournamentId));
+    const teams = await where(SHEETS.Teams, { tournamentId });
     return teams.map((tm) => ({ id: tm.id, isTeam: true }));
   }
 

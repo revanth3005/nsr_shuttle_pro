@@ -1,4 +1,4 @@
-import { readSheet, findById, insertRow, updateRow, deleteRow, search, filter } from "../excel/store.js";
+import { readSheet, findById, insertRow, updateRow, deleteRow, search, filter, where } from "../excel/store.js";
 import { SHEETS } from "../excel/schema.js";
 import { genId, nowIso } from "../utils.js";
 
@@ -45,13 +45,13 @@ export async function updateTournament(id, patch) {
 // the rows and resyncing once at the end is enough — no per-match revert
 // bookkeeping needed.
 export async function removeTournament(id) {
-  const matches = await filter(SHEETS.Matches, (m) => String(m.tournamentId) === String(id));
+  const matches = await where(SHEETS.Matches, { tournamentId: id });
   for (const m of matches) await deleteRow(SHEETS.Matches, m.id);
 
-  const teams = await filter(SHEETS.Teams, (t) => String(t.tournamentId) === String(id));
+  const teams = await where(SHEETS.Teams, { tournamentId: id });
   for (const t of teams) await deleteRow(SHEETS.Teams, t.id);
 
-  const regs = await filter(SHEETS.Registrations, (r) => String(r.tournamentId) === String(id));
+  const regs = await where(SHEETS.Registrations, { tournamentId: id });
   for (const r of regs) await deleteRow(SHEETS.Registrations, r.id);
 
   if (matches.length) {
